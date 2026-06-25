@@ -1,0 +1,451 @@
+-- ═══════════════════════════════════════════════════
+--   detroit.lol — TSUM ESP v5
+--   by xxksehotan
+--   Очистка имён до английских (Brand + Type)
+-- ═══════════════════════════════════════════════════
+
+local RS = game:GetService("ReplicatedStorage")
+local LP = game:GetService("Players").LocalPlayer
+local MS = game:GetService("MarketplaceService")
+
+local config = require(RS:WaitForChild("ClothingConfig"))
+local rarityColors = {}
+for rn, rd in pairs(config.RARITIES or {}) do
+    if type(rd)=="table" and rd.color then
+        local c = rd.color
+        if typeof(c)=="Color3" then rarityColors[rn]=c
+        elseif type(c)=="table" then rarityColors[rn]=Color3.new(c[1] or 0,c[2] or 0,c[3] or 0) end
+    end
+end
+local function close(a,b) return math.abs(a.R-b.R)<0.05 and math.abs(a.G-b.G)<0.05 and math.abs(a.B-b.B)<0.05 end
+
+-- ═══════════════════════════════════════════════════
+--   ОЧИСТКА ИМЁН (ru → en, точное название)
+-- ═══════════════════════════════════════════════════
+local CATEGORY = {
+    ["толстовк"]="Hoodie", ["худи"]="Hoodie", ["свитшот"]="Sweatshirt",
+    ["футболк"]="T-Shirt", ["майк"]="Tank Top", ["поло"]="Polo",
+    ["штан"]="Pants", ["брюк"]="Pants", ["джинс"]="Jeans",
+    ["шорт"]="Shorts", ["карго"]="Cargo Pants",
+    ["куртк"]="Jacket", ["пальто"]="Coat", ["пуховик"]="Puffer",
+    ["кофт"]="Sweater", ["свитер"]="Sweater", ["кардиган"]="Cardigan",
+    ["рубашк"]="Shirt", ["платье"]="Dress", ["юбк"]="Skirt",
+    ["кроссовк"]="Sneakers", ["ботинк"]="Boots", ["туфл"]="Shoes",
+    ["обувь"]="Shoes", ["сапог"]="Boots", ["слайд"]="Slides", ["сандал"]="Sandals",
+    ["кепк"]="Cap", ["шапк"]="Beanie", ["шляп"]="Hat", ["панам"]="Bucket Hat",
+    ["очк"]="Sunglasses", ["сумк"]="Bag", ["рюкзак"]="Backpack",
+    ["цеп"]="Chain", ["час"]="Watch", ["пояс"]="Belt", ["ремен"]="Belt",
+    ["перчатк"]="Gloves", ["шарф"]="Scarf", ["галстук"]="Tie",
+    ["серьг"]="Earring", ["кольц"]="Ring", ["браслет"]="Bracelet",
+    ["топ"]="Top", ["боди"]="Bodysuit", ["лонгслив"]="Longsleeve",
+    ["пиджак"]="Blazer", ["костюм"]="Suit", ["комбинезон"]="Jumpsuit",
+}
+
+local COLOR = {
+    ["черн"]="Black", ["чёрн"]="Black", ["бел"]="White", ["красн"]="Red",
+    ["син"]="Blue", ["зелён"]="Green", ["зелен"]="Green",
+    ["жёлт"]="Yellow", ["желт"]="Yellow", ["сер"]="Gray", ["коричнев"]="Brown",
+    ["розов"]="Pink", ["фиолетов"]="Purple", ["оранжев"]="Orange",
+    ["голуб"]="Light Blue", ["бежев"]="Beige", ["золот"]="Gold",
+    ["серебр"]="Silver", ["хаки"]="Khaki", ["бордов"]="Burgundy",
+}
+
+local function cleanName(orig)
+    if not orig or orig == "" then return orig end
+
+    -- 1) собираем латиницу (бренды/EN-слова)
+    local latinWords = {}
+    for w in orig:gmatch("[A-Za-z][A-Za-z%-%.'0-9]*") do
+        if #w >= 2 then table.insert(latinWords, w) end
+    end
+    local latinPart = table.concat(latinWords, " ")
+
+    local lower = orig:lower()
+
+    -- 2) категория
+    local category
+    for ru, en in pairs(CATEGORY) do
+        if lower:find(ru, 1, true) then category = en; break end
+    end
+
+    -- 3) цвет
+    local color
+    for ru, en in pairs(COLOR) do
+        if lower:find(ru, 1, true) then color = en; break end
+    end
+
+    -- 4) собираем точное имя
+    if latinPart ~= "" then
+        local result = latinPart
+        local lowerLatin = latinPart:lower()
+        if category and not lowerLatin:find(category:lower(), 1, true) then
+            result = result .. " " .. category
+        end
+        if color and not result:lower():find(color:lower(), 1, true) then
+            result = result .. " " .. color
+        end
+        return result
+    elseif category then
+        return color and (color .. " " .. category) or category
+    end
+    return orig
+end
+
+-- ═══════════════════════════════════════════════════
+--   NAME CACHE
+-- ═══════════════════════════════════════════════════
+local nameCache = {}      -- [id] = cleaned name | "PENDING" | "FAIL"
+local rawNameCache = {}   -- [id] = original (для дебага)
+local fetchQueue = {}
+local fetching = false
+
+local function processQueue()
+    if fetching then return end
+    fetching = true
+    task.spawn(function()
+        while #fetchQueue > 0 do
+            local id = table.remove(fetchQueue, 1)
+            if nameCache[id] == "PENDING" then
+                local ok, info = pcall(function()
+                    return MS:GetProductInfo(tonumber(id), Enum.InfoType.Asset)
+                end)
+                if ok and info and info.Name then
+                    rawNameCache[id] = info.Name
+                    nameCache[id] = cleanName(info.Name)
+                else
+                    nameCache[id] = "FAIL"
+                end
+                task.wait(0.15)
+            end
+        end
+        fetching = false
+    end)
+end
+
+local function requestName(id)
+    if not id then return nil end
+    if nameCache[id] and nameCache[id] ~= "PENDING" and nameCache[id] ~= "FAIL" then
+        return nameCache[id]
+    end
+    if not nameCache[id] then
+        nameCache[id] = "PENDING"
+        table.insert(fetchQueue, id)
+        processQueue()
+    end
+    return nil
+end
+
+-- ═══════════════════════════════════════════════════
+local ESP = {
+    enabled = false,
+    rarities = { Legendary=true, Epic=false, Rare=false, Uncommon=false, Common=false },
+    showRarity = true, showName = true, showRaw = false, showAssetId = false, showDistance = true,
+    cleanNames = true,
+    textSize = 16, useTextScaled = false,
+    maxDistance = 500, scanInterval = 2,
+    useRarityColor = true,
+    nameFilterEnabled = false,
+}
+
+local nameFilters = {}
+local activeESP = {}
+
+local function getSlotData(slot)
+    local rarity = nil
+    for _, d in ipairs(slot:GetDescendants()) do
+        if d:IsA("Highlight") then
+            for rn, rc in pairs(rarityColors) do
+                if close(d.FillColor, rc) then rarity = rn; break end
+            end
+            break
+        end
+    end
+    if not rarity then return nil end
+    local mainId = nil
+    for _, d in ipairs(slot:GetDescendants()) do
+        local tmpl
+        if d:IsA("Shirt") then tmpl = d.ShirtTemplate
+        elseif d:IsA("Pants") then tmpl = d.PantsTemplate end
+        if tmpl and tmpl ~= "" then
+            local id = tmpl:match("%d+")
+            if id then mainId = id; break end
+        end
+    end
+    return { rarity = rarity, assetId = mainId }
+end
+
+local function getCurrentName(data)
+    if not data.assetId then return nil end
+    local cached = ESP.cleanNames and nameCache[data.assetId] or rawNameCache[data.assetId]
+    if cached and cached ~= "PENDING" and cached ~= "FAIL" then return cached end
+    return nil
+end
+
+local function shouldShow(data)
+    if not ESP.rarities[data.rarity] then return false end
+    if ESP.nameFilterEnabled and #nameFilters > 0 then
+        local name = getCurrentName(data)
+        if not name then return false end
+        local lname = name:lower()
+        for _, f in ipairs(nameFilters) do
+            if lname:find(f, 1, true) then return true end
+        end
+        return false
+    end
+    return true
+end
+
+local function getAdornee(slot)
+    local m = slot:FindFirstChild("Mannequin")
+    if m then
+        local p = m.PrimaryPart or m:FindFirstChild("Torso") or m:FindFirstChildWhichIsA("BasePart")
+        return m, p or slot
+    end
+    return slot, slot
+end
+
+local function getDist(part)
+    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp or not part then return 9999 end
+    local ok, pos = pcall(function() return part.Position end)
+    if not ok then return 9999 end
+    return (hrp.Position - pos).Magnitude
+end
+
+local function addESP(slot, data)
+    if activeESP[slot] then return end
+    if data.assetId then requestName(data.assetId) end
+    local adornee, pivot = getAdornee(slot)
+    local color = ESP.useRarityColor and (rarityColors[data.rarity] or Color3.fromRGB(255,200,0)) or Color3.fromRGB(255,200,0)
+
+    local hl = Instance.new("Highlight")
+    hl.Adornee = adornee; hl.FillColor = color
+    hl.OutlineColor = Color3.fromRGB(255,255,255); hl.FillTransparency = 0.4
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop; hl.Parent = adornee
+
+    local bb = Instance.new("BillboardGui")
+    bb.Adornee = pivot; bb.Size = UDim2.new(0,340,0,55)
+    bb.StudsOffset = Vector3.new(0,4,0); bb.AlwaysOnTop = true
+    bb.MaxDistance = ESP.maxDistance; bb.Parent = pivot
+
+    local lbl = Instance.new("TextLabel")
+    lbl.BackgroundTransparency = 1; lbl.Size = UDim2.fromScale(1,1)
+    lbl.TextColor3 = color; lbl.TextStrokeTransparency = 0
+    lbl.Font = Enum.Font.GothamBold; lbl.Parent = bb
+
+    activeESP[slot] = { hl=hl, bb=bb, lbl=lbl, data=data, pivot=pivot }
+end
+
+local function removeESP(slot)
+    local d = activeESP[slot]; if not d then return end
+    if d.hl then d.hl:Destroy() end
+    if d.bb then d.bb:Destroy() end
+    activeESP[slot] = nil
+end
+local function clearAll() for s in pairs(activeESP) do removeESP(s) end end
+
+local function getAllSlots()
+    local r = {}
+    for _, c in ipairs(workspace:GetChildren()) do
+        if c.Name:find("^Shop_") then
+            local is = c:FindFirstChild("ItemSlots")
+            if is then for _, s in ipairs(is:GetChildren()) do table.insert(r,s) end end
+            local as = c:FindFirstChild("AccessorySlots")
+            if as then for _, s in ipairs(as:GetChildren()) do table.insert(r,s) end end
+        end
+    end
+    return r
+end
+
+local function refreshActive()
+    for slot, e in pairs(activeESP) do
+        if not shouldShow(e.data) then removeESP(slot) end
+    end
+end
+
+local function scan()
+    for _, slot in ipairs(getAllSlots()) do
+        local d = getSlotData(slot)
+        if d and ESP.rarities[d.rarity] then
+            if d.assetId then requestName(d.assetId) end
+            if shouldShow(d) and not activeESP[slot] then
+                local _, p = getAdornee(slot)
+                if getDist(p) < ESP.maxDistance then addESP(slot, d) end
+            elseif not shouldShow(d) and activeESP[slot] then removeESP(slot) end
+        elseif activeESP[slot] then removeESP(slot) end
+    end
+    for slot, esp in pairs(activeESP) do
+        if not slot.Parent then removeESP(slot)
+        elseif getDist(esp.pivot) > ESP.maxDistance * 1.2 then removeESP(slot) end
+    end
+end
+
+local function start()
+    task.spawn(function()
+        local hits = 0
+        for i, slot in ipairs(getAllSlots()) do
+            if not ESP.enabled then break end
+            local d = getSlotData(slot)
+            if d and ESP.rarities[d.rarity] then
+                if d.assetId then requestName(d.assetId) end
+                if shouldShow(d) then addESP(slot, d); hits = hits + 1 end
+            end
+            if i % 60 == 0 then task.wait() end
+        end
+        print("[detroit.lol] Подсвечено: " .. hits)
+    end)
+    task.spawn(function() while ESP.enabled do pcall(scan); task.wait(ESP.scanInterval) end end)
+    task.spawn(function()
+        while ESP.enabled do
+            for slot, e in pairs(activeESP) do
+                if slot.Parent and e.pivot then
+                    local parts = {}
+                    if ESP.showRarity then table.insert(parts, "[" .. e.data.rarity .. "]") end
+                    if ESP.showName then
+                        local raw = e.data.assetId and rawNameCache[e.data.assetId]
+                        local clean = e.data.assetId and nameCache[e.data.assetId]
+                        if clean == "PENDING" or clean == nil then table.insert(parts, "...")
+                        elseif clean == "FAIL" then table.insert(parts, "?")
+                        else
+                            if ESP.cleanNames then
+                                table.insert(parts, clean)
+                                if ESP.showRaw and raw and raw ~= clean then
+                                    table.insert(parts, "(" .. raw .. ")")
+                                end
+                            else
+                                table.insert(parts, raw or clean)
+                            end
+                        end
+                    end
+                    if ESP.showAssetId and e.data.assetId then table.insert(parts, "#"..e.data.assetId) end
+                    if ESP.showDistance then table.insert(parts, math.floor(getDist(e.pivot)) .. "m") end
+                    e.lbl.Text = table.concat(parts, " ")
+                    if ESP.useTextScaled then e.lbl.TextScaled = true
+                    else e.lbl.TextScaled = false; e.lbl.TextSize = ESP.textSize end
+                    e.bb.MaxDistance = ESP.maxDistance
+                end
+            end
+            if ESP.nameFilterEnabled then
+                for slot, e in pairs(activeESP) do
+                    if not shouldShow(e.data) then removeESP(slot) end
+                end
+            end
+            task.wait(0.3)
+        end
+    end)
+end
+local function stop() ESP.enabled = false; clearAll() end
+
+-- ═══════════════════════════════════════════════════
+local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+local Window = Fluent:CreateWindow({
+    Title = "detroit.lol — Tsum ESP v5",
+    SubTitle = "by xxksehotan",
+    TabWidth = 140, Size = UDim2.fromOffset(620, 510),
+    Acrylic = false, Theme = "Dark",
+    MinimizeKey = Enum.KeyCode.LeftControl,
+})
+
+local TabMain = Window:AddTab({ Title = "ESP", Icon = "eye" })
+local TabRar = Window:AddTab({ Title = "Редкости", Icon = "star" })
+local TabSearch = Window:AddTab({ Title = "Поиск", Icon = "search" })
+local TabNames = Window:AddTab({ Title = "Имена", Icon = "tag" })
+local TabText = Window:AddTab({ Title = "Текст", Icon = "type" })
+local TabInfo = Window:AddTab({ Title = "Инфо", Icon = "info" })
+
+local s = TabMain:AddSection("Управление")
+s:AddToggle("M",{Title="Включить ESP",Default=false,
+    Callback=function(v) ESP.enabled=v; if v then start() else stop() end end})
+s:AddToggle("RC",{Title="Цвет по редкости",Default=true,Callback=function(v) ESP.useRarityColor=v end})
+
+local sInfo = TabMain:AddSection("Что показывать")
+sInfo:AddToggle("Rar",{Title="[Редкость]",Default=true,Callback=function(v) ESP.showRarity=v end})
+sInfo:AddToggle("Nm",{Title="Название",Default=true,Callback=function(v) ESP.showName=v end})
+sInfo:AddToggle("AI",{Title="Asset ID",Default=false,Callback=function(v) ESP.showAssetId=v end})
+sInfo:AddToggle("D",{Title="Дистанция",Default=true,Callback=function(v) ESP.showDistance=v end})
+
+local sPerf = TabMain:AddSection("Производительность")
+sPerf:AddSlider("MD",{Title="Макс. дистанция",Default=500,Min=50,Max=3000,Rounding=0,
+    Callback=function(v) ESP.maxDistance=v end})
+sPerf:AddSlider("SI",{Title="Интервал скан. (сек)",Default=2,Min=0.5,Max=10,Rounding=1,
+    Callback=function(v) ESP.scanInterval=v end})
+
+local sr = TabRar:AddSection("Редкости")
+for _, rname in ipairs({"Legendary","Epic","Rare","Uncommon","Common"}) do
+    sr:AddToggle("R_"..rname,{Title=rname,Default=ESP.rarities[rname] or false,
+        Callback=function(v) ESP.rarities[rname]=v; refreshActive() end})
+end
+local sgp = TabRar:AddSection("Пресеты")
+sgp:AddButton({Title="💎 Только Legendary",Callback=function()
+    for r in pairs(ESP.rarities) do ESP.rarities[r]=false end
+    ESP.rarities.Legendary=true; refreshActive() end})
+sgp:AddButton({Title="🟣 Epic + Legendary",Callback=function()
+    for r in pairs(ESP.rarities) do ESP.rarities[r]=false end
+    ESP.rarities.Legendary=true; ESP.rarities.Epic=true; refreshActive() end})
+sgp:AddButton({Title="🌈 Все",Callback=function()
+    for r in pairs(ESP.rarities) do ESP.rarities[r]=true end; refreshActive() end})
+
+-- ═══ ПОИСК ═══
+local sFilt = TabSearch:AddSection("Фильтр по имени")
+sFilt:AddToggle("NF",{Title="🎯 Включить фильтр",Default=false,
+    Callback=function(v) ESP.nameFilterEnabled=v; refreshActive() end})
+local currentQuery = ""
+sFilt:AddInput("Q",{Title="Запрос",Placeholder="balenciaga, prada, hoodie...",
+    Default="",Finished=false,
+    Callback=function(t) currentQuery=(t or ""):lower():gsub("^%s+",""):gsub("%s+$","") end})
+sFilt:AddButton({Title="➕ Добавить",Callback=function()
+    if currentQuery == "" then return end
+    for _, f in ipairs(nameFilters) do if f == currentQuery then return end end
+    table.insert(nameFilters, currentQuery); refreshActive()
+    Fluent:Notify({Title="➕",Content="Добавлено ("..#nameFilters..")",Duration=2})
+end})
+sFilt:AddButton({Title="🗑️ Очистить",Callback=function()
+    nameFilters={}; refreshActive(); Fluent:Notify({Title="🗑️",Content="Очищено",Duration=2}) end})
+sFilt:AddButton({Title="📋 Активные",Callback=function()
+    Fluent:Notify({Title="Фильтры",Content=#nameFilters>0 and table.concat(nameFilters,", ") or "Пусто",Duration=6}) end})
+
+-- ═══ ИМЕНА ═══
+local sNm = TabNames:AddSection("Очистка имён")
+sNm:AddToggle("CN",{Title="✨ Очищать в английский (Brand + Type)",Default=true,
+    Callback=function(v) ESP.cleanNames=v end})
+sNm:AddToggle("SR",{Title="Показать оригинал в скобках",Default=false,
+    Callback=function(v) ESP.showRaw=v end})
+sNm:AddParagraph({Title="ℹ️ Как работает",
+    Content="Берёт сырое имя из Roblox API (часто на русском) и:\n1. Вытаскивает английские слова (бренд)\n2. Определяет тип по русским ключевикам\n3. Собирает: 'Balenciaga Hoodie Black'\n\nПример:\n• Было: толстовка с принтом логотипа Balenciaga\n• Стало: Balenciaga Hoodie"})
+
+local sCache = TabNames:AddSection("Кеш")
+sCache:AddButton({Title="📊 Статус",Callback=function()
+    local ok, p, f = 0, 0, 0
+    for _, v in pairs(nameCache) do
+        if v=="PENDING" then p=p+1 elseif v=="FAIL" then f=f+1 else ok=ok+1 end
+    end
+    Fluent:Notify({Title="📊",Content="OK: "..ok.." | В очереди: "..p.." | Failed: "..f,Duration=5}) end})
+sCache:AddButton({Title="🗑️ Очистить кеш",Callback=function()
+    nameCache={}; rawNameCache={}; fetchQueue={}
+    Fluent:Notify({Title="🗑️",Content="Очищено",Duration=2}) end})
+sCache:AddButton({Title="📜 Вывести в F9",Callback=function()
+    print("\n=== ИМЕНА ===")
+    for id, clean in pairs(nameCache) do
+        if clean ~= "PENDING" and clean ~= "FAIL" then
+            print("  ["..id.."] "..clean.." ← "..(rawNameCache[id] or "?"))
+        end
+    end end})
+
+local sText = TabText:AddSection("Размер")
+sText:AddToggle("TS",{Title="Авто-масштаб",Default=false,Callback=function(v) ESP.useTextScaled=v end})
+sText:AddSlider("TSize",{Title="Размер шрифта",Default=16,Min=8,Max=48,Rounding=0,
+    Callback=function(v) ESP.textSize=v end})
+
+local si = TabInfo:AddSection("О скрипте")
+si:AddParagraph({Title="detroit.lol — Tsum ESP v5",
+    Content="by xxksehotan 🖊️\n\n✨ Имена через Roblox API + очистка\n• Подгружаются ~6/сек\n• Очищаются в EN: Brand + Type + Color\n• Кешируются на сессию\n\nЕсли '?' — Roblox удалил/скрыл ассет"})
+
+local IM = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+local SM = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
+IM:SetLibrary(Fluent); SM:SetLibrary(Fluent)
+IM:SetFolder("detroit_lol"); SM:SetFolder("detroit_lol/configs")
+IM:BuildInterfaceSection(TabInfo); SM:BuildConfigSection(TabInfo)
+
+Window:SelectTab(1)
+Fluent:Notify({Title="detroit.lol 🚀",Content="Tsum ESP v5 by xxksehotan",Duration=5})
+SM:LoadAutoloadConfig()
